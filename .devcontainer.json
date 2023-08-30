@@ -1,0 +1,17 @@
+{
+    "image": "jupyter/scipy-notebook:python-3.8",
+    "customizations": {
+        // Configure properties specific to VS Code.
+        "vscode": {
+          // Add the IDs of extensions you want installed when the container is created.
+          "extensions":
+                ["ms-python.python",
+                "github.copilot",
+                "donjayamanne.python-extension-pack",
+                "ms-toolsai.jupyter-keymap",
+                "ms-toolsai.jupyter",
+                "ms-toolsai.vscode-jupyter-slideshow",
+                "ms-toolsai.vscode-jupyter-cell-tags"]
+        }
+    }
+}

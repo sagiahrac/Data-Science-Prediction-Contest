@@ -1,0 +1,59 @@
+# bring in the micromamba image so we can copy files from it
+FROM mambaorg/micromamba:0.24.0 as micromamba
+
+# This is the image we are going add micromaba to:
+FROM rocker/tidyverse:4.2.2
+
+ARG MAMBA_USER=root
+ARG MAMBA_USER_ID=0
+ARG MAMBA_USER_GID=0
+ENV MAMBA_USER=$MAMBA_USER
+ENV MAMBA_ROOT_PREFIX="/opt/conda"
+ENV MAMBA_EXE="/bin/micromamba"
+
+COPY --from=micromamba "$MAMBA_EXE" "$MAMBA_EXE"
+COPY --from=micromamba /usr/local/bin/_activate_current_env.sh /usr/local/bin/_activate_current_env.sh
+COPY --from=micromamba /usr/local/bin/_dockerfile_shell.sh /usr/local/bin/_dockerfile_shell.sh
+COPY --from=micromamba /usr/local/bin/_entrypoint.sh /usr/local/bin/_entrypoint.sh
+COPY --from=micromamba /usr/local/bin/_activate_current_env.sh /usr/local/bin/_activate_current_env.sh
+COPY --from=micromamba /usr/local/bin/_dockerfile_initialize_user_accounts.sh /usr/local/bin/_dockerfile_initialize_user_accounts.sh
+COPY --from=micromamba /usr/local/bin/_dockerfile_setup_root_prefix.sh /usr/local/bin/_dockerfile_setup_root_prefix.sh
+
+RUN /usr/local/bin/_dockerfile_initialize_user_accounts.sh && \
+    /usr/local/bin/_dockerfile_setup_root_prefix.sh && \
+    echo rsession-which-r=${RSTUDIO_WHICH_R} > /etc/rstudio/rserver.conf && \
+    echo rsession-ld-library-path=${CONDAENV}/lib >> /etc/rstudio/rserver.conf && \
+    echo "R_LIBS_USER=${CONDAENV}/lib/R/library" > /home/rstudio/.Renviron
+
+SHELL ["/usr/local/bin/_dockerfile_shell.sh"]
+
+ENTRYPOINT ["/usr/local/bin/_entrypoint.sh"]
+
+# populate the "base" conda environment:
+USER $MAMBA_USER
+COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
+RUN micromamba install --yes --file /tmp/environment.yml && \
+    micromamba  clean --all --yes
+
+WORKDIR ${HOME}
+
+# Copy directory files to image 
+COPY --chown=$MAMBA_USER_ID:$MAMBA_USER_GID . ${HOME}
+
+# Settings required for conda+rstudio
+
+ENV RSTUDIO_WHICH_R=/usr/local/bin/R
+ENV RETICULATE_PYTHON=/usr/local/bin/python
+# RUN export RSTUDIO_WHICH_R=/usr/local/bin/R
+RUN export RETICULATE_PYTHON=/usr/local/bin/python
+
+# RUN install2.r --error \
+#     --deps TRUE \
+#     ggmosaic \
+#     glue \
+#     tidymodels \
+#     glmnet \
+#     randomForest \
+#     kernlab
+
+CMD ["/init"]

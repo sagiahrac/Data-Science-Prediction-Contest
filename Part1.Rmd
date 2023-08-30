@@ -1,0 +1,596 @@
+---
+title: "Exploratory Data Analysis"
+author: "Sagi and Dean"
+date: "2023-08-15"
+output: pdf_document
+---
+
+```{python, echo=F, eval=F}
+# !pip install pandas numpy sklearn imblearn matplotlib nltk seaborn torch torchvision torchaudio tqdm openai plotly xgboost transformers
+```
+
+# Intro
+
+Before we start building our model, let's take a look at the data we have. We'll start by loading the data into a pandas data frame. After that, we'll take a look at the data, and prepare it for the feature engineering / feature extraction step. Eventually, we'll split the data for train, validation and test sets, and look for interesting patterns in the train data that our model can learn from.
+
+```{python}
+import pandas as pd
+
+nutrients = pd.read_csv("data/nutrients.csv")
+food_nutrients = pd.read_csv("data/food_nutrients.csv")
+food_train = pd.read_csv("data/food_train.csv")
+```
+
+```{python, echo=F}
+pd.set_option('display.max_rows', 6)
+```
+
+\
+
+# Food Nutrients Dataset
+
+```{python}
+food_nutrients
+```
+
+The amount column isn't meaningful without the serving units. This gives us a hint that we need to merge information from the two datasets.
+
+There're no missing values within the nutrients dataset:
+
+```{python}
+food_nutrients.isna().any().any()
+```
+
+There are only 48 unique nutrients in the snacks dataset:
+
+```{python}
+food_nutrients["nutrient_id"].nunique()
+```
+
+\
+
+It would be convenient to add a column for each nutrient and fill it with the amount of the nutrient in the food. Default value will be 0, indicating the food doesn't contain the nutrient. This way, we can easily join the food_nutrients with the snacks datasets.
+
+```{python}
+food_nutrients_wide = food_nutrients.pivot_table(
+    index=["idx"], columns=["nutrient_id"], values=["amount"], fill_value=0
+).droplevel(0, axis=1)
+food_nutrients_wide  # single row for each snack
+```
+
+Some nutrients are very rare:
+
+```{python}
+(food_nutrients_wide > 0).mean().sort_values().head(10)
+```
+
+Still, we'll keep them in the dataset for now, and see if they're useful for our model. It might be due to the fact that some nutrients are only found in a specific food category.
+
+We aim to use the nutrients dataset to predict the food category, as there aren't too many nutrient variables. Therefore, we need to merge the nutrients dataset with the snacks dataset. We'll use the food id to merge the two datasets.
+
+After taking a glance in the nutrients distributions with each other among snacks, we saw that some nutrients are frequently positive, while others are not. In addition **some** of them are correlated. We'll find out later how useful they are, and from what threshold should we eliminate nutrients.\
+
+# Nutrients Dataset
+
+```{python}
+nutrients
+```
+
+No missing values in nutrients:
+
+```{python}
+nutrients.isna().any().any()
+```
+
+A single duplicated name:
+
+```{python}
+nutrients[nutrients["name"].duplicated(keep=False)].sort_values(by="name")
+```
+
+It might be useful to later unify there 2 nutrients into 1, as they are the same. We'll do that by scaling by the appropriate factor (KCAL -\> KJ).
+
+Before applying any machine learning algorithms, we usually need to preprocess the data. This includes feature scaling as well. Thus, `unit_name` variable is redundant, as it's just a string representation for a scaling factor. We'll add the unit name as a suffix to the column name, and then drop the `unit_name` column.
+
+```{python, echo=F}
+nutrients_v2 = nutrients.copy()
+
+nutrients_v2.loc[:, "name"] = (
+    nutrients.apply(lambda row: f'{row["name"]}__({row["unit_name"]})', axis=1)
+    .str.replace(" ", "_")
+    .str.replace(",", "")
+    .str.lower()
+)
+nutrients_v2.drop(columns=["unit_name"], inplace=True)
+nutrients_v2.set_index("nutrient_id", inplace=True)
+```
+
+```{python}
+nutrients_v2
+```
+
+Now let's merge the information from both two datasets, keeping in mind we need to scale the `KCAL` nutrient by 4.184 to get `KJ`.
+
+```{python}
+food_nutrients_merged = food_nutrients_wide.rename(mapper=nutrients_v2["name"], axis=1)
+
+food_nutrients_merged.loc[:, "energy__(kj)"] += (
+    4.184 * food_nutrients_merged.loc[:, "energy__(kcal)"]
+)  # convert kcal to kJ
+food_nutrients_merged.drop(
+    columns=["energy__(kcal)"], inplace=True
+)  # duplicated nutrient
+
+food_nutrients_merged.head()
+```
+
+It might be plausible to later drop infrequent nutrients, as they might not be useful for the classification task. Let's check the most infrequent nutrients:
+
+```{python}
+(food_nutrients_merged > 0).sum().sort_values().to_frame().rename(
+    columns={0: "frequency"}
+).head()
+```
+
+All the information we need is now in a single dataframe. Recall that each nutrient column associates with a single unit name. We tried to find a correlation between the category and the sum of nutrients values, grouped by the unit name, but decided to drop it. We can now start exploring the training data, and see if we can find any interesting patterns.
+
+```{python}
+food_nutrients_merged.to_csv("data/food_nutrients_merged.csv")
+```
+
+\
+
+# Food Training Dataset
+
+## Hold-Out
+
+We'll split to train, validation and test sets before we start to explore the data, so we won't have to worry about data leakage. We'll use 15% of the data for validation and 5% for test.
+
+```{python, echo=F}
+food_train["category"] = food_train["category"].apply(lambda x: x.split('_')[0]) # for readability
+```
+
+```{python}
+from sklearn.model_selection import train_test_split
+
+
+features_df = food_train.drop("category", axis=1)
+labels_df = food_train["category"]
+
+X_train, X_val_test, y_train, y_val_test = train_test_split(
+    features_df, labels_df, test_size=0.2, random_state=42
+)
+
+X_val, X_test, y_val, y_test = train_test_split(
+    X_val_test, y_val_test, test_size=0.25, random_state=42
+)
+
+X_train["y"] = y_train
+```
+
+\
+
+## Missing Values
+
+```{python}
+X_train.isna().sum().sort_values(ascending=False)
+```
+
+Let's check the columns with missing values. The household_serving_fulltext doesn't have many missing values, and I couldn't find anything interesting about them, so I decided to omit them from this section.
+
+```{python}
+X_train[X_train["ingredients"].isna()]["y"].value_counts(
+    normalize=True
+).to_frame().rename(columns={"y": "rate"})
+```
+
+Seems like there's a majority of `ingredients` missing values for the `popcorn_peanuts_seeds_related_snacks` category. That being said, there's less than 1% of the data missing, and I couldn't find strong enough evidence for interesting patterns about the snacks with missing ingredients. Thus, we'll replace the missing values with the string "na", and leave it as is.
+
+```{python, echo = T, results = 'hide'}
+from helpers.preprocess import FillNA
+
+FillNA().fit_transform(X=X_train)
+```
+
+Now, we'll join the snacks dataset with the `food_nutrients_merged` dataset. We'll use the `food_id` column to join the two datasets.
+
+```{python}
+from helpers.preprocess import MergeWithFoodNutrients
+
+X_train = MergeWithFoodNutrients().fit_transform(X=X_train)
+X_train
+```
+
+We have a dataset of 55 features, combining information from all 3 tabular datasets.
+
+Let's analyze the data a bit more.
+
+\
+
+## Ingredients
+
+The `ingredients` is an interesting column, as it may be considered as a nested column. Some of the ingredients contains list of ingredients, and some contains a single ingredient. We'll need to preprocess this column before we can use it for training.
+
+```{python}
+X_train["ingredients"].head()
+```
+
+Note that the data is noisy and contains typos in a small percentage of the data:
+
+```{python}
+from collections import Counter
+
+ingredients_example = X_train.loc[18201, "ingredients"]
+chars_counter = Counter(ingredients_example)
+
+chars_counter["("] == chars_counter[")"]
+```
+
+First, we'll omit text between () and []:
+
+```{python}
+from helpers.preprocess import CleanAndListifyIngredients
+
+CleanAndListifyIngredients(keep_top_n=3).fit_transform(X_train)["ingredients"].head()
+```
+
+20 most correlated ingredients with one of the categories (target variable), sorted by their frequency in the dataset:
+
+```{python}
+from helpers.utils import highest_accuracy_category
+
+
+ingredients = X_train["ingredients"].str.split(" ").explode().str.strip()
+ingredients_frequencies = ingredients.value_counts()
+
+
+important_ingredients = highest_accuracy_category(
+    df=X_train,
+    frequent_tokens=ingredients_frequencies,
+    colname="ingredients",
+    min_token_frequeny=100,
+).head(20)
+
+important_ingredients
+```
+
+Some ingredients are very correlated with one of the categories. For example, the `ingredients` column contains `potatoes` in 99.4% of the `chips_pretzels_snacks` category. Recall there are many ingredients, and we tested each one of them with each category. Thus, we'll need to be careful not to overfit the model to the ingredients column.
+
+\
+
+## household_serving_fulltext
+
+The numeric value of the serving size is usually the first word in the `household_serving_fulltext` column. As we can see, there are many different ways to write the serving size, and the correlation for each one of them with the category is not significant, considering the number of different serving sizes we have.
+
+```{python}
+serving_frequencies = (
+    X_train["household_serving_fulltext"]
+    .str.split(" ")
+    .apply(lambda x: x[0])
+    .value_counts()
+)
+
+highest_accuracy_category(
+    df=X_train,
+    frequent_tokens=serving_frequencies,
+    colname="household_serving_fulltext",
+    min_token_frequeny=30,
+    verbose=True,
+).head(10)
+```
+
+The second word of the `household_serving_fulltext` column usually contains the serving unit. Some of them are very correlated with the category, but again, there are many different serving units, and some literally describe the category (e.g. `cake`).
+
+```{python}
+X_train[X_train["household_serving_fulltext"].str.contains("wafer", regex=False)][
+    "y"
+].value_counts(normalize=True)
+```
+
+```{python}
+serving_frequencies = (
+    X_train["household_serving_fulltext"]
+    .str.split(" ")
+    .apply(lambda x: x[1] if len(x) > 1 else "na")
+    .value_counts()
+)
+
+highest_accuracy_category(
+    df=X_train,
+    frequent_tokens=serving_frequencies,
+    colname="household_serving_fulltext",
+    min_token_frequeny=100,
+    verbose=True,
+).head(20)
+```
+
+\
+
+## Brand
+
+The brand column contains useful information. The probability for each catgory dramatically changes depending on the brand:
+
+```{python}
+import seaborn as sns
+
+most_frequesnt_brand = X_train["brand"].mode()[0]
+
+categories_all_brands = pd.DataFrame(
+    {
+        "y": X_train["y"],
+        "Distribution": "All Brands",
+    }
+)
+
+categories_most_freq_brand = pd.DataFrame(
+    {
+        "y": X_train[X_train["brand"] == most_frequesnt_brand]["y"],
+        "Distribution": most_frequesnt_brand,
+    }
+)
+
+df_combined = pd.concat([categories_all_brands, categories_most_freq_brand])
+df_combined["y"] = pd.Categorical(
+    df_combined["y"], list(categories_all_brands["y"].value_counts().index)
+)
+
+sns.set_theme()
+sns.displot(
+    df_combined, x="y", hue="Distribution", stat="probability", common_norm=False
+)
+```
+
+We'll get the posterior distributions for each category using Naive Bayes, while treating brands as tokens.
+
+```{python}
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+
+sentences = X_train["brand"].str.replace(" ", "")
+val_sentences = X_val["brand"].str.replace(" ", "")
+
+# Step 1: Create the bag-of-words representation
+vectorizer = CountVectorizer(ngram_range=(1, 1))
+train_matrix = vectorizer.fit_transform(sentences)
+val_matrix = vectorizer.transform(val_sentences)
+
+# Step 2: Train the Naive Bayes classifier
+nb_classifier = MultinomialNB()
+nb_classifier.fit(train_matrix, y_train)
+
+# Step 3: Predict using the classifier
+y_pred_nb = nb_classifier.predict(val_matrix)
+
+# Step 4: Evaluation
+print("Accuracy:", accuracy_score(y_val, y_pred_nb))
+print("Classification Report:")
+print(classification_report(y_val, y_pred_nb))
+```
+
+62% Accuracy only by using the `brand`! Such a simple algorithm attained nice accuracy for predicting the category, conditioned only by the snack `brand`.
+
+Note that the maximum snacks per brand for a certain category is not very high, hence we have many unique brands. We'll have to consider than in case we desire to vectorize the `brand` column.
+
+Let's try do the same with `description`.
+
+\
+
+## Description
+
+The `description` is a very interesting column, as it contains a lot of unstructured information about the food. We'll expect to achieve much better accuracy with the Naive Bayes approach. We use CountVectorizer to vectorize the column to the words count, while utilizing some nice features such as eliminating stop-words, considering n-grams as single tokens, strip accents of non alphanumeric characters and more.
+
+```{python}
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, classification_report
+
+sentences = X_train["description"]
+val_sentences = X_val["description"]
+
+# Step 1: Create the bag-of-words representation
+vectorizer = CountVectorizer(
+    stop_words="english", ngram_range=(1, 6), strip_accents="unicode"
+)
+train_matrix = vectorizer.fit_transform(sentences)
+val_matrix = vectorizer.transform(val_sentences)
+
+# Step 2: Train the Naive Bayes classifier
+nb_classifier = MultinomialNB()
+nb_classifier.fit(train_matrix, y_train)
+
+# Step 3: Predict using the classifier
+y_pred_nb = nb_classifier.predict(val_matrix)
+
+# Step 4: Evaluation
+print("Accuracy:", accuracy_score(y_val, y_pred_nb))
+print("Classification Report:")
+print(classification_report(y_val, y_pred_nb))
+```
+
+90% accuracy is really good, considering the simplicity of the model. The precision and recall of the `chocolate` category is much lower the the others. In addition, f1 score of `candy` is also disturbing, since most of our snacks in the dataset are candies.
+
+For each category, we'll check the most important words in the description:
+
+```{python}
+feature_names = vectorizer.get_feature_names_out()
+class_names = [name.split("_")[0] for name in nb_classifier.classes_]
+num_classes = len(class_names)
+
+for i, class_name in enumerate(class_names):
+    print(f"Most important words for class '{class_name}':")
+    top_features_idx = nb_classifier.feature_log_prob_[i].argsort()[::-1][:10]
+    top_features = [feature_names[idx] for idx in top_features_idx]
+    print(", ".join(top_features), end="\n\n")
+```
+
+The intersection between the most important words for each category is very small, but not empty. For example, the word `chocolate` is important for all categories but `chips_pretzels_snacks`. The words `creme`, `milk` and `salt` are among the 10 most important words for more than a single category. We'll find out what is the extent of important words/n-grams for each category, until they become uninformative.
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+fig, axs = plt.subplots(3, 2, figsize=(10, 10))
+fig.suptitle("Degradation of top 1000 words/ngrams log-probability for each class")
+
+for c in range(6):
+    i, j = c // 2, c % 2
+    axs[i, j].scatter(
+        range(1000), np.sort(nb_classifier.feature_log_prob_[c])[-1000:][::-1], s=10
+    )
+    axs[i, j].plot(
+        range(1000), np.sort(nb_classifier.feature_log_prob_[c])[-1000:][::-1]
+    )
+    axs[i, j].set_title(class_names[c])
+
+for ax in fig.get_axes():
+    ax.label_outer()
+
+plt.show()
+```
+
+There are many different n-grams, possibly leading to big increase in the number of features. I'd like to try out a simple model first, replacing the `description` and `brand` columns, each with 6 columns - one for each category. The value of each column will be the log-probability of the feature column to associate with the category, according to the Naive Bayes model.
+
+Replacing `brand` and `description` with their Naive Bayes scores:
+
+```{python, echo = T, results = 'hide'}
+from helpers.preprocess import NaiveBayesScores
+
+NaiveBayesScores(
+    colname="brand", preprocess_func=lambda x: x.replace(" ", "")
+).fit_transform(X=X_train, y=y_train)
+
+NaiveBayesScores(
+    colname="description",
+    vectorizer_kwgs=dict(
+        stop_words="english", ngram_range=(1, 6), strip_accents="unicode"
+    ),
+).fit_transform(X=X_train, y=y_train)
+```
+
+```{python}
+X_train[[f"{brand}_nb_score_chocolate" for brand in ["brand", "description"]]].head()
+```
+
+```{python}
+X_train.iloc[:2, -6:] # description scores
+np.exp(X_train.iloc[:2, -6:]).sum(axis=1) # probabilities sum to 1
+```
+
+Eventually, I'd like to try running ensemble based models over the raw vectorization features, to see if we can bypass the accuracy attained by the Naive Bayes score features.
+
+\
+
+## Serving Size Unit
+
+```{python}
+X_train["serving_size_unit"].value_counts()
+```
+
+```{python}
+X_train[X_train["serving_size_unit"] == "ml"]["y"]
+```
+
+Not a very informative column, as \>99.9% of the data is `g`. We'll drop this column.
+
+```{python, echo = T, results = 'hide'}
+from helpers.preprocess import DropColumns
+
+DropColumns(columns=["serving_size_unit"]).fit_transform(X=X_train)
+```
+
+\
+
+## Serving Size
+
+First, we'll take a look at the distribution of the serving size per category:
+
+```{python}
+import seaborn as sns
+
+ax = sns.boxplot(
+    x=X_train["y"].apply(lambda x: x.split("_")[0]), y=np.log(X_train["serving_size"])
+)
+ax.set(xlabel="Category", ylabel="Log Serving size")
+```
+
+Can't really tell how helpful this column is, as the distribution is somewhat similar for some categories. It may be useful to know that when the serving size is low, the food is probably a candy, and there might be more patterns like that. This column is 'cheap' for our model, as it is a numeric column with no missing values. We'll keep this column for now, after applying log transformation.
+
+```{python, echo = T, results = 'hide'}
+from helpers.preprocess import LogTransformation
+
+LogTransformation(columns=["serving_size"]).fit_transform(X=X_train)
+```
+
+\
+
+# Images Dataset
+
+We tried ResNet18 as **fixed** feature extractor, to see how well can we predict the category by applying a linear classifier on top of the features extracted from the images ($ResNet18:\mathbb{R}^{224\times224}\rightarrow\mathbb{R}^{1000}$).
+
+Based on <https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html>
+
+The csv's of the extracted features were quite heavy (300mb), so I'll just share the findings (code blocks are still in the rmd file, as we intended to demonstrate the process).
+
+Using ResNet18 as a frozen net, and applying a LogisticRegression over the output layer, results with 52% accuracy, way more than randomness can explain. Recall that we didn't touch any of the original net weights.
+
+Later we'll fine-tune ResNet18 and add the score features as columns.
+
+ResNet code at `resnet.py`.
+
+```{python, echo=F, eval=F}
+from torchvision import models
+from resnet import get_datasets
+import torch
+from tqdm import tqdm
+
+model_ft = models.resnet18(weights="IMAGENET1K_V1")
+model_ft.eval()
+
+datasets = get_datasets(X_train, y_train, X_val, y_val)
+train_ds = datasets["train"]
+
+
+with torch.no_grad():
+    for phase, ds in datasets.items():
+        features, labels = [], []
+        loop = tqdm(range(len(ds)))
+        for i in loop:
+            _, image, label = ds[i]
+            resnet18_features = model_ft(image.unsqueeze(0)).squeeze(0).numpy()
+
+            features.append(resnet18_features)
+            labels.append(label)
+
+        rs18_df = pd.DataFrame(features)
+        rs18_df["y"] = labels
+        rs18_df.to_csv(f"data/resnet18_{phase}_features.csv")
+```
+
+```{python, echo=F, eval=F}
+from sklearn.linear_model import LogisticRegression
+
+num_classes = 6
+
+train_data = pd.read_csv("data/resnet18_train_features.csv")
+val_data = pd.read_csv("data/resnet18_val_features.csv")
+
+X_train_logistic = train_data.drop(columns=["y"])
+X_val_logistic = val_data.drop(columns=["y"])
+labels_train = train_data["y"]
+labels_val = val_data["y"]
+
+model = LogisticRegression(multi_class="multinomial", solver="lbfgs")
+
+model.fit(X_train_logistic, labels_train)
+
+labels_pred = model.predict(X_val_logistic)
+
+accuracy = accuracy_score(labels_val, labels_pred)
+```
+
+```{python, echo=F, eval=F}
+print("Accuracy:", accuracy)
+```

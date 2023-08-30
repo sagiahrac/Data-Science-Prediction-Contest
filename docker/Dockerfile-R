@@ -1,0 +1,10 @@
+FROM rocker/tidyverse:4.2.2
+
+RUN install2.r --error \
+    --deps TRUE \
+    ggmosaic \
+    glue \
+    tidymodels \
+    glmnet \
+    randomForest \
+    kernlab
