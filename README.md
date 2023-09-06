@@ -1,4 +1,5 @@
 <img src="images/DSApps_logo_small.jpg" align="right" />
+
 # Overview
 
 This repository contains a report on a classification contest I participated in.
